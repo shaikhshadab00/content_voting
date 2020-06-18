@@ -1,0 +1,5 @@
+name = Content Voting
+description = Custom module for content voting,
+package = Custom
+core = 7.x
+dependencies[] = number

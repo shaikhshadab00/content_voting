@@ -1,0 +1,55 @@
+<?php
+
+/**
+  * @file
+  * Install, update and uninstall functions for the content voting module.
+  */
+
+function content_voting_schema() {
+    $schema['content_voting'] = array(
+        'description' => 'content voting data',
+        'fields' => array(
+            'uid' => array(
+                'description' => 'The identifier for a user.',
+                'type' => 'int',
+                'unsigned' => TRUE,
+                'not null' => TRUE,
+                'default' => 0
+            ),
+            'nid' => array(
+                'description' => 'The identifier for a node.',
+                'type' => 'int',
+                'unsigned' => TRUE,
+                'not null' => TRUE,
+                'default' => 0
+            ),
+            'type' => array(
+                'description' => 'The type of this node.',
+                'type' => 'varchar',
+                'length' => 64,
+                'not null' => TRUE,
+                'default' => ''
+            ),
+            'timestamp' => array(
+                'description' => 'The Unix timestamp',
+                'type' => 'int',
+                'not null' => TRUE,
+                'default' => 0
+            ),
+            'vote' => array(
+                'description' => 'The vote data',
+                'type' => 'varchar',
+                'length' => 32,
+                'not null' => TRUE,
+                'default' => ''
+            ),
+        ),
+        'indexes' => array(
+            'nid' => array('nid'),
+            'uid' => array('uid'),
+            'vote' => array('vote'),
+        ),
+    );
+  
+    return $schema;
+}

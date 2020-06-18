@@ -1,0 +1,514 @@
+<?php
+
+/**
+ * @file 
+ * Hook implementaion, helper functions for the content voting module.
+ */
+
+ /**
+ * Implements hook_init()
+ */
+function content_voting_init() {
+    $content_voting_enable = variable_get('content_voting_enable', FALSE);
+    if ($content_voting_enable == TRUE) {
+        $content_voting_setting = variable_get('content_voting_setting', 'login_user_can_vote');
+        $content_voting_login_required= 'No';
+
+        if ($content_voting_setting == 'login_user_can_vote' && !user_is_logged_in()) {
+            $content_voting_login_required = 'Yes';
+        }
+
+        drupal_add_js(array('content_voting_login_required' => $content_voting_login_required), 'setting');  
+        drupal_add_js(drupal_get_path('module', 'content_voting') . '/js/content_voting.js');
+    }
+}
+
+ /**
+ * Implements hook_menu().
+ */
+function content_voting_menu() {
+    $items = array();
+    $items['admin/config/content_voting'] = array(
+      'title' => 'Content voting Configuration',
+      'page callback' => 'drupal_get_form',
+      'page arguments' => array('content_voting_admin_config_form'),
+      'access arguments' => array('access administration pages'),
+      'type' => MENU_CALLBACK,
+    );
+    $items['admin/content_voting/fields/confirm/%/%'] = array(
+        'title' => 'Content voting Confirmation',
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('content_voting_create_delete_fields_confirm_form', 4, 5),
+        'access arguments' => array('access administration pages'),
+        'type' => MENU_CALLBACK,
+    );
+    $items['cast-content-vote-ajax'] = array(
+        'page callback' => 'content_voting_cast_content_vote_ajax',
+        'access arguments' => array('access content'),
+        'type' => MENU_CALLBACK,
+    );
+    $items['admin/config/content_voting/list'] = array(
+      'title' => 'Content voting list',
+      'page callback' => 'drupal_get_form',
+      'page arguments' => array('content_voting_list_form'),
+      'access arguments' => array('access administration pages'),
+      'type' => MENU_CALLBACK,
+    );
+
+    return $items;
+}
+
+/**
+ * Admin config form
+ */
+function content_voting_admin_config_form($form, $form_state) {
+
+    $form['settings']['content_voting_enable'] = array(
+        '#type' => 'checkbox',
+        '#title' => t('Enable Content voting'),
+        '#default_value' => variable_get('content_voting_enable', FALSE),
+    );
+
+    $form['settings']['content_voting_setting'] = array(
+        '#type' => 'radios',
+        '#title' => t('Select Content voting setting'),
+        '#default_value' => variable_get('content_voting_setting', 'login_user_can_vote'),
+        '#options' => array(
+          'login_user_can_vote' => t('Only login user can vote'),
+          'anonymous_user_can_vote' => t('Anonymous user and login user both can vote'),
+        ),
+    );
+
+  return system_settings_form($form); 
+}
+
+/**
+ * Ajax function to cast  content vote.
+ */
+function content_voting_cast_content_vote_ajax() {
+    global $user;
+
+    $status = 0;
+    $message = "Voting failed";
+    $uid = isset($user->uid) ? $user->uid : 0;
+    $nid = isset($_GET['nid']) ? $_GET['nid'] : '';
+    $vote = isset($_GET['vote']) ? $_GET['vote'] : '';
+    
+    if (is_numeric($nid)) {
+        $status = 1;
+        $node = node_load($nid);
+        $node_type = $node->type;
+        $timestamp = time();
+
+        // validate same user has voted same node
+        $exit_id = '';
+        $content_voting_setting = variable_get('content_voting_setting', 'login_user_can_vote');
+    
+        if ($content_voting_setting == 'login_user_can_vote') {
+            // login_user_can_vote
+            $exit_id = db_select("content_voting", "cv")
+                        ->fields("cv", array("nid"))
+                        ->condition("uid", $uid)
+                        ->execute()
+                        ->fetchField();
+        
+            $message = "You already voted for same content";
+        }
+        else if ($content_voting_setting == 'anonymous_user_can_vote') {
+            // anonymous_user_can_vote
+            $cookie_data = 'voted_' . $vote;
+            $cookie_name = 'content_voting_' . $uid;
+            $cookie_value = isset($_COOKIE[$cookie_name]) ? json_decode($_COOKIE[$cookie_name], true) : array();
+            
+            $exit_id = array_search($cookie_data, $cookie_value);
+            $message = "You already voted for same content";
+        }
+
+        if (empty($exit_id)) {
+            // Insert vote data into table
+            db_insert('content_voting')
+                    ->fields(array(
+                        'uid' => $uid,
+                        'nid' => $nid,
+                        'type' => $node_type,
+                        'timestamp' => $timestamp,
+                        'vote' => $vote,
+                    ))
+                   ->execute();
+
+            // Get Content voting  count for node
+            $number_of_vote = db_select("content_voting", "cv")
+                                ->fields("cv", array("nid"))
+                                ->condition("nid", $nid)
+                                ->condition("vote", $vote)
+                                ->countQuery()->execute()->fetchField();
+
+            // Update Content voting  count into node field.
+            $field = 'field_content_voting_'  . $vote . '_count';  // field name
+            $node->{$field}[LANGUAGE_NONE][0]['value'] = $number_of_vote;
+            field_attach_update('node', $node);
+            entity_get_controller('node')->resetCache(array($node->nid));
+
+            // anonymous_user_can_vote
+            if ($content_voting_setting == 'anonymous_user_can_vote') {
+                $cookie_value[] = $cookie_data;
+                setcookie($cookie_name, json_encode($cookie_value), strtotime("+1 year"), "/");
+            }
+
+            $message = "Thank you for voting";
+        }
+    }
+	drupal_json_output(array('status' => $status, 'message' => $message));
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter
+ *
+ * - Add an option to content type for
+ *   content voting.
+ */
+function content_voting_form_node_type_form_alter(&$form, &$form_state) {
+    // Creating a fieldset and a checkbox form for content type edit form.
+    if (empty($form['#node_type']->type)) {
+      return;
+    }
+
+    $form['content_voting_setting'] = array(
+      '#type' => 'fieldset',
+      '#title' => t('Content Voting'),
+      '#collapsible' => TRUE,
+      '#collapsed' => TRUE,
+      '#group' => 'additional_settings',
+    );
+
+    $form['content_voting_setting']["{$form['#node_type']->type}_content_voting_setting"] = array(
+      '#title' => t('Enable for content voting'),
+      '#type' => 'checkbox',
+      '#default_value' => variable_get("{$form['#node_type']->type}_content_voting_setting", 0),
+    );
+
+  $form['#submit'][] = 'content_voting_create_delete_fields_submit';
+} // End of content_voting_form_node_type_form_alter
+
+/**
+ * Implements hook_form_alter.
+ */
+function content_voting_form_alter(&$form, &$form_state, $form_id) {
+    if (isset($form['type']) && !empty($form['type']['#value'])) {
+        $content_type = $form['type']['#value'];
+        $content_voting_setting = variable_get("{$content_type}_content_voting_setting", 0);
+        if ($content_voting_setting == 1 && $form_id == $content_type . '_node_form') {
+          $form['field_content_voting_up_count']['#disabled'] = TRUE;
+          $form['field_content_voting_down_count']['#disabled'] = TRUE;
+        }
+    } 
+}
+
+/**
+ * - Custom submit function to redirect content
+ *   voting confirm form.
+ */
+function content_voting_create_delete_fields_submit(&$form, &$form_state) {
+    $values = $form_state['values'];
+    $content_type = $values['type'];
+    $new_content_voting_setting = $values["{$content_type}_content_voting_setting"];
+   
+    variable_set("{$content_type}_content_voting_new_setting", $new_content_voting_setting);
+    $old_content_voting_setting = variable_get("{$content_type}_content_voting_setting", 0);
+
+    // If any difference available in node setting then redirect to confirmation from.
+    if ($new_content_voting_setting != $old_content_voting_setting) {
+      $form_state['redirect'] = "admin/content_voting/fields/confirm/$content_type/$new_content_voting_setting";
+    }
+}
+
+/**
+ * - Confirmation form for content voting field
+ */
+function content_voting_create_delete_fields_confirm_form($form, &$form_state, $content_type, $content_voting_setting) {
+ 
+    if (empty($content_type)) {
+        $form['empty_message'] = array(
+            '#markup' => t('Empty content type'),
+        );
+        
+        return $form;
+    }
+
+    $form['content_voting_setting'] = array(
+        '#type' => 'hidden',
+        '#value' => $content_voting_setting,
+    );
+
+    $form['content_type'] = array(
+        '#type' => 'hidden',
+        '#value' => $content_type,
+    );
+
+    if ($content_voting_setting == 1) {
+        $form['field_create_message'] = array(
+            '#type' => 'markup',
+            '#markup' => t("Are you sure you want Content voting count fields to be create in @content_type content type?", array('@content_type' => $content_type)),
+            '#prefix' => '<div class="field-create-delete-message" style="margin:10px 0 10px 0;font-weight:bold;">',
+            '#suffix' => '</div>',
+        );
+    }
+    else if ($content_voting_setting == 0) {
+        $form['field_delete_message'] = array(
+            '#type' => 'markup',
+            '#markup' => t("Are you sure you want Content voting  count fields to be delete in @content_type content type?", array('@content_type' => $content_type)),
+            '#prefix' => '<div class="field-create-delete-message" style="margin:10px 0 10px 0;font-weight:bold;">',
+            '#suffix' => '</div>',
+        );
+        $form['delete_for_db'] = array(
+          '#type' =>  'checkbox', 
+          '#title' => t("Please checked if you also want @content_type Content voting data delete from custom table", array('@content_type' => $content_type)),
+        );
+    }
+
+    $form['process'] = array(
+        '#type' => 'submit',
+        '#value' => t('Process'),
+        '#attributes' => array('class' => array('btn', 'btn-success'), 'style' => array('margin-top:2%')),
+        '#prefix' => '<div class="submit-buttons">'
+      );
+      $form['cancel'] = array(
+        '#type' => 'submit',
+        '#value' => t('Cancel'),
+        '#attributes' => array('class' => array('btn', 'btn-danger'), 'style' => array('margin-top:2%')),
+        '#suffix' => '</div>',
+      );
+
+      return $form;   
+}
+
+/**
+ *  Submiit function for content voting field
+ */
+function content_voting_create_delete_fields_confirm_form_submit($form, &$form_state) {
+    $values = $form_state['values'];
+    $content_voting_setting = $values['content_voting_setting'];
+    $content_type = $values['content_type'];
+
+    $message = array('message_text' => '', 'status' => 'status');
+
+    if ($values['op'] == 'Process') {
+        $field_names = $field_labels = array();
+ 
+        $field_names[] = 'field_content_voting_up_count';
+        $field_labels[] = "Content voting up count";
+ 
+        $field_names[] = 'field_content_voting_down_count';
+        $field_labels[] = "Content voting down count";
+
+        if ($content_voting_setting == 1) {
+            foreach ($field_names as $key => $field_name) {
+                // Create field base
+                $field_info = field_info_field($field_name);
+                $field_base = empty($field_info) ? content_voting_create_integer_field_base($field_name) : array(); 
+
+                // field instance
+                $field_instance = field_info_instance('node', $field_name, $content_type);
+                $field_instance = empty($field_instance) ? content_voting_create_integer_field_instance($field_name, $content_type, $field_labels[$key]) : $field_instance;
+                
+                if (empty($field_instance)) {
+                   break;
+                }
+            }
+
+            if (empty($field_instance)) {
+                $message['message_text'] = t("Unable to create field instance in @content_type content type", array('@content_type' => $content_type));
+                $message['status'] = 'error';  
+            }
+            else if (!empty($field_instance)) {
+                $message['message_text'] = t("Successfully create field instance in @content_type content type", array('@content_type' => $content_type));
+                $message['status'] = 'status';
+            }
+        }
+
+        else if ($content_voting_setting == 0) {
+            foreach ($field_names as $key => $field_name) { 
+                $field_instance = field_info_instance('node', $field_name, $content_type);
+                if (!empty($field_instance)) {
+                    field_delete_instance($field_instance);
+                    $message['message_text'] = t("Successfully delete field instance in @content_type content type", array('@content_type' => $content_type));
+                }
+            }
+
+            if ($values['delete_for_db'] == TRUE) {
+                db_delete('content_voting')
+                  ->condition('type', $content_type)
+                  ->execute();
+
+                  $cookie_name = 'content_voting_' . $content_type;
+                  if (isset($_COOKIE[$cookie_name])) {
+                      setcookie($cookie_name, json_encode(array()), time() - 3600);
+                  }
+
+                $message['message_text'] = t("Successfully delete field instance and content voting data for @content_type content type", array('@content_type' => $content_type));
+
+          }
+        
+          $message['status'] = 'status';
+
+        }
+
+        variable_set("{$content_type}_content_voting_setting", $content_voting_setting); // Store sub tree tree setting
+        drupal_set_message($message['message_text'], $message['status']);
+    }
+
+    $form_state['redirect'] = 'admin/structure/types';
+}
+
+/**
+ * - Helper function to create field
+ *   base for integer field.
+ *
+ * @param $field_name
+ *   Name of the field.
+ * 
+ * @param $cardinality_limit
+ *  Limit of the values
+ *
+ * @return $field_base
+ *  Return array of field base
+ *
+ */
+function content_voting_create_integer_field_base($field_name, $cardinality_limit = 1) {
+    $field_base = array();
+    if (empty($field_name)) {
+      return $field_base;
+    }
+
+    // field_base for entity reference field.
+    $integer_field_base = array(
+      'active' => 1,
+      'cardinality' => $cardinality_limit,
+      'deleted' => 0,
+      'entity_types' => array(),
+      'field_name' => $field_name,
+      'foreign keys' => array(),
+      'indexes' => array(),
+      'locked' => 0,
+      'module' => 'number',
+      'settings' => array(),
+      'translatable' => 0,
+      'type' => 'number_integer',
+    );
+
+    $field_info = field_info_field($field_name);
+    $field_base = empty($field_info) ? field_create_field($integer_field_base) : field_update_field($integer_field_base);
+    
+    return $field_base;
+} // End of content_voting_create_integer_field_base().
+
+/**
+ * - Helper function to create instance
+ *   of the integer field.
+ *
+ * @param $field_name
+ *  Name of the field.
+ *
+ * @param $bundle
+ *  Name of the content type.
+ *
+ * @return $field_instance
+ *  Return array of field instance
+ *
+ */
+function content_voting_create_integer_field_instance($field_name, $bundle, $field_label) {
+    $field_instance = array();
+    if (empty($field_name) || empty($bundle) || empty($field_label)) {
+      return $field_instance;
+    }
+    $integer_field_instance = array(
+      'bundle' => $bundle,
+      'default_value' => NULL,
+      'deleted' => 0,
+      'description' => 'Store Content voting  count number',
+      'display' => array(
+        'default' => array(
+          'label' => 'above',
+          'module' => 'number',
+          'settings' => array(
+            'decimal_separator' => '.',
+            'prefix_suffix' => TRUE,
+            'scale' => 0,
+            'thousand_separator' => '',
+          ),
+          'type' => 'number_integer',
+          'weight' => 25,
+        ),
+      ),
+      'entity_type' => 'node',
+      'field_name' => $field_name,
+      'label' => $field_label,
+      'required' => 0,
+      'settings' => array(
+        'max' => '',
+        'min' => '',
+        'prefix' => '',
+        'suffix' => '',
+        'user_register_form' => FALSE,
+      ),
+      'widget' => array(
+        'active' => 0,
+        'module' => 'number',
+        'settings' => array(),
+        'type' => 'number',
+        'weight' => 46,
+      ),
+    );
+
+    $field_instance = field_create_instance($integer_field_instance);
+  
+    return $field_instance;
+} // End of content_voting_create_integer_field_instance().
+  
+
+/**
+ * Callback function content_voting_list_form
+ */
+function content_voting_list_form($form, $form_state) {
+  $header = array(
+      array('data' => t('Nid'), 'field' => 'nid', 'sort' => 'desc'),
+      array('data' => t('Uid'), 'field' => 'uid', 'sort' => 'desc'),
+      array('data' => t('Type')),
+      array('data' => t('Date & time'), 'field' => 'timestamp', 'sort' => 'desc'),
+      array('data' => t('Vote')),
+  );
+
+  $query = db_select('content_voting', 'cv')
+              ->fields('cv');
+
+  $result = $query->orderBy("timestamp", "DESC")
+              ->extend('TableSort')
+              ->orderByHeader($header)
+              ->extend('PagerDefault')
+              ->limit(20)
+              ->execute()
+              ->fetchAll();
+
+  $rows = array();
+  foreach($result as $res) {
+      $rows[] = array(
+        $res->nid, 
+        $res->uid,
+        $res->type, 
+        date('d M Y H:i:s', $res->timestamp),
+        $res->vote);
+  }
+
+  // If rows are not empty theme and display the rows.
+  $output = '';
+  if (!empty($rows)) {
+    $output = theme('table', array('header' => $header, 'rows' => $rows, 'attributes' => array('id' => 'sort-table')));
+    $output .= theme('pager');
+  }
+
+  $form['tabke'] = array(
+    '#markup' => $output, 
+  );
+
+  return $form;
+}
